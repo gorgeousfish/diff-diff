@@ -74,13 +74,12 @@ pytest.importorskip(
     reason="LWDiD estimator not yet on main (arrives via PR #588)",
 )
 
-from diff_diff.lwdid import LWDiD  # noqa: E402
-
 from diff_diff import (  # noqa: E402
     DifferenceInDifferences,  # noqa: E402
     load_prop99,
     load_walmart,
 )
+from diff_diff.lwdid import LWDiD  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Published replication targets (LW 2026; see module docstring for provenance)

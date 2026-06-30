@@ -608,6 +608,41 @@ exponential unit distance weights, and time decay weights with LOOCV tuning.
    TROP is computationally intensive. Use ``method='global'`` for faster
    estimation at the cost of some flexibility vs. ``method='local'``.
 
+LWDiD (Lee & Wooldridge)
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+**When to use**: Panel data where unit-specific rolling transformations
+(demeaning or detrending) can remove pre-treatment heterogeneity, combined
+with flexible cross-sectional treatment effect estimation (RA, IPW, IPWRA,
+or PSM). Particularly suited when you want a transformation-based
+alternative to propensity-score reweighting under staggered adoption.
+
+**Key features**:
+
+- Converts panel DiD into cross-sectional estimation via unit-specific
+  transformations (demean or detrend) applied to pre-treatment outcomes
+- Supports both common timing and staggered adoption designs
+  (never-treated / not-yet-treated controls)
+- Doubly-robust IPWRA estimation with multiple VCE options: classical,
+  HC0–HC4, cluster-robust
+- Built-in specification robustness: compare demean vs detrend as an
+  informal pre-test for sensitivity to trend assumptions
+
+**vs TWFE**: LWDiD explicitly handles heterogeneous treatment effects;
+the transformation removes unit fixed effects prior to estimation, avoiding
+the negative-weighting problem under treatment effect heterogeneity.
+
+**vs Callaway-Sant'Anna**: LWDiD uses rolling transformations rather than
+propensity-score reweighting for staggered designs, offering a different
+identification strategy with analytical (non-bootstrap) inference.
+
+**Example**::
+
+    from diff_diff import LWDiD
+    est = LWDiD(rolling='demean', estimator='ipwra', vce='cluster')
+    results = est.fit(data, outcome='y', unit='id', time='time',
+                      treatment='treated', cluster='state')
+
 Bacon Decomposition
 ~~~~~~~~~~~~~~~~~~~
 

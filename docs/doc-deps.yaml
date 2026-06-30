@@ -68,6 +68,16 @@ groups:
   changes_in_changes:
     - diff_diff/changes_in_changes.py
     - diff_diff/changes_in_changes_results.py
+  lwdid:
+    - diff_diff/lwdid.py
+    - diff_diff/lwdid_results.py
+    - diff_diff/lwdid_exceptions.py
+    - diff_diff/lwdid_wild_bootstrap.py
+    - diff_diff/lwdid_randomization.py
+    - diff_diff/lwdid_trend_diagnostics.py
+    - diff_diff/lwdid_sensitivity.py
+    - diff_diff/lwdid_visualization.py
+    - diff_diff/lwdid_clustering.py
   visualization:
     - diff_diff/visualization/__init__.py
     - diff_diff/visualization/_common.py
@@ -684,6 +694,66 @@ sources:
       - path: docs/choosing_estimator.rst
         type: user_guide
       - path: docs/r_comparison.rst
+        type: user_guide
+
+  # ── LWDiD (lwdid group) ───────────────────────────────────────────
+
+  diff_diff/lwdid_exceptions.py:
+    drift_risk: low
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid_wild_bootstrap.py:
+    drift_risk: medium
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid_randomization.py:
+    drift_risk: medium
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid_trend_diagnostics.py:
+    drift_risk: medium
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid_sensitivity.py:
+    drift_risk: medium
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid_visualization.py:
+    drift_risk: low
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid_clustering.py:
+    drift_risk: low
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+
+  diff_diff/lwdid.py:
+    drift_risk: medium
+    docs:
+      - path: docs/api/lwdid.rst
+        type: api_reference
+      - path: README.md
+        section: "Estimators (one-line catalog entry)"
+        type: user_guide
+      - path: docs/references.rst
+        type: user_guide
+      - path: diff_diff/guides/llms.txt
+        section: "Estimators"
+        type: user_guide
+      - path: docs/choosing_estimator.rst
         type: user_guide
 
   # ── TROP (trop group) ──────────────────────────────────────────────

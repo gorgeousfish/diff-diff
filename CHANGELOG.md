@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`LWDiD` (Lee & Wooldridge 2025, 2026 rolling-transformation DiD).** Unit-specific
+  demean/detrend converts panel to cross-section; supports staggered adoption with
+  never-treated / not-yet-treated control groups, RA/IPW/IPWRA estimation, and
+  cluster-robust inference. Alias `LW`.
 - **`RegressionDiscontinuity` - sharp AND fuzzy regression discontinuity estimation
   with robust bias-corrected inference (alias `RDD`).** Local-polynomial RD per
   Calonico, Cattaneo & Titiunik (2014), parity-targeting R `rdrobust` 4.0.0
