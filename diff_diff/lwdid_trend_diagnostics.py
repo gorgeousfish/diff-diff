@@ -314,7 +314,7 @@ def _identify_pre_periods(data: pd.DataFrame, time: str, treatment: str, unit: s
     """
     treated_times = data.loc[data[treatment] == 1, time].unique()
     if len(treated_times) == 0:
-        raise DiagnosticError("No treated observations found in the data.")
+        raise ValueError("No treated observations found in the data.")
 
     first_treat = int(min(treated_times))
     all_times = sorted(data[time].unique())
@@ -493,7 +493,7 @@ def test_parallel_trends(
     if not isinstance(data, pd.DataFrame):
         raise TypeError(f"data must be a pandas DataFrame, got {type(data).__name__}.")
     if data.empty:
-        raise DiagnosticError("data must not be empty.")
+        raise ValueError("data must not be empty.")
     for col_name, col_val in [
         ("outcome", outcome),
         ("unit", unit),
@@ -501,7 +501,7 @@ def test_parallel_trends(
         ("treatment", treatment),
     ]:
         if col_val not in data.columns:
-            raise DiagnosticError(
+            raise ValueError(
                 f"Column '{col_val}' (specified as {col_name}) not found in data. "
                 f"Available columns: {list(data.columns)}"
             )
@@ -517,7 +517,7 @@ def test_parallel_trends(
     pre_periods, first_treat = _identify_pre_periods(data, time, treatment, unit)
 
     if len(pre_periods) < 2:
-        raise InsufficientPrePeriodsError(
+        raise ValueError(
             f"Need at least 2 pre-treatment periods for parallel trends test, "
             f"got {len(pre_periods)}."
         )
@@ -692,7 +692,7 @@ def diagnose_heterogeneous_trends(
     pre_periods, first_treat = _identify_pre_periods(data, time, treatment, unit)
 
     if len(pre_periods) < 2:
-        raise InsufficientPrePeriodsError(
+        raise ValueError(
             f"Need at least 2 pre-treatment periods for trend diagnosis, "
             f"got {len(pre_periods)}."
         )
@@ -706,9 +706,9 @@ def diagnose_heterogeneous_trends(
     control_units = set(ever_treated[~ever_treated].index)
 
     if not treated_units:
-        raise DiagnosticError("No treated units identified.")
+        raise ValueError("No treated units identified.")
     if not control_units:
-        raise DiagnosticError("No control units identified.")
+        raise ValueError("No control units identified.")
 
     # Estimate slopes for each group
     treated_pre = pre_data[pre_data[unit].isin(treated_units)]

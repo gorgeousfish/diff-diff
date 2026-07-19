@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from scipy import linalg as scipy_linalg
+from scipy.stats import norm as _scipy_norm
 
 from diff_diff.linalg import solve_logit, solve_ols
 from diff_diff.lwdid_results import LWDiDResults
@@ -222,6 +223,7 @@ class LWDiD:
         cohort: Optional[str] = None,
         cluster: Optional[str] = None,
         controls: Optional[List[str]] = None,
+        aggregate: Optional[str] = None,
     ) -> LWDiDResults:
         """Fit the LWDiD estimator.
 
@@ -246,6 +248,10 @@ class LWDiD:
             Required when vce='cluster'.
         controls : list of str, optional
             Column names for control variables (covariates).
+        aggregate : str, optional
+            Aggregation method for staggered designs. If "event_study",
+            computes per-relative-period WATT(r) estimates with
+            Algorithm 1 multiplier bootstrap simultaneous confidence bands.
 
         Returns
         -------
@@ -277,6 +283,8 @@ class LWDiD:
         # Dispatch to common timing or staggered
         if cohort is None:
             return self._fit_common_timing(df, outcome, unit, time, treatment, cluster, controls)
+        elif aggregate == "event_study":
+            return self._fit_event_study(df, outcome, unit, time, cohort, cluster, controls)
         else:
             return self._fit_staggered(df, outcome, unit, time, cohort, cluster, controls)
 
@@ -462,6 +470,19 @@ class LWDiD:
         LWDiDResults
             Estimation results.
         """
+        # Validation: treatment must be absorbing (once treated, stays treated)
+        unit_treat_seq = df.sort_values(time).groupby(unit)[treatment].apply(list)
+        for uid, seq in unit_treat_seq.items():
+            saw_one = False
+            for v in seq:
+                if v == 1:
+                    saw_one = True
+                elif saw_one and v == 0:
+                    raise ValueError(
+                        f"Non-absorbing treatment detected for unit '{uid}': "
+                        f"treatment switches from 1 to 0. LWDiD requires absorbing treatment."
+                    )
+
         # Step 1: Identify pre/post periods from treatment column
         # Pre-treatment: periods where NO unit is treated
         # Post-treatment: periods where at least one unit is treated
@@ -534,7 +555,16 @@ class LWDiD:
         cs_df = cs_df.merge(unit_post_avg, on=unit, how="inner")
 
         # After merge, drop units whose transformation produced NaN
+        n_before_drop = len(cs_df)
         cs_df = cs_df.dropna(subset=["_ydot_avg"])
+        n_dropped = n_before_drop - len(cs_df)
+        if n_dropped > 0 and len(cs_df) > 0:
+            warnings.warn(
+                f"LWDiD: {n_dropped} unit(s) dropped due to NaN transformed outcomes "
+                f"(insufficient pre-treatment periods for '{self.rolling}' transformation).",
+                UserWarning,
+                stacklevel=2,
+            )
         if len(cs_df) == 0:
             nan = float("nan")
             warnings.warn(
@@ -597,6 +627,13 @@ class LWDiD:
 
         # Get cluster ids
         cluster_ids = None
+        if cluster is not None and self.vce != 'cluster':
+            warnings.warn(
+                f"LWDiD: cluster='{cluster}' is ignored because vce='{self.vce}' "
+                f"(set vce='cluster' to enable cluster-robust inference).",
+                UserWarning,
+                stacklevel=2,
+            )
         if cluster is not None and self.vce == "cluster":
             cluster_ids = cs_df[cluster].values
 
@@ -723,6 +760,14 @@ class LWDiD:
         LWDiDResults
             Estimation results with cohort_effects populated.
         """
+        # Validation: cohort must be time-invariant within units
+        varying = df.groupby(unit)[cohort].nunique()
+        bad = varying[varying > 1]
+        if len(bad) > 0:
+            raise ValueError(
+                f"Cohort must be time-invariant. Found {len(bad)} unit(s) with varying cohort."
+            )
+
         # Warn if period_specific is requested (not supported for staggered)
         if self.period_specific:
             warnings.warn(
@@ -751,6 +796,12 @@ class LWDiD:
             raise ValueError(
                 "control_group='never_treated' requires at least one "
                 "never-treated unit (cohort=0), but none found."
+            )
+
+        if self.control_group == "never_treated" and len(never_treated_units) < 2:
+            raise ValueError(
+                f"control_group='never_treated' requires at least 2 never-treated units "
+                f"for valid estimation (LW 2026 p.26). Found {len(never_treated_units)}."
             )
 
         all_times = sorted(df[time].unique())
@@ -898,6 +949,16 @@ class LWDiD:
                 y_g, treat_g, controls_matrix_g, cluster_ids_g, n_obs_g
             )
 
+            # Skip cohort if estimation failed
+            if not np.isfinite(att_g):
+                warnings.warn(
+                    f"LWDiD: Cohort g={g} skipped — insufficient data or no valid "
+                    f"control units for estimation.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                continue
+
             df_g = max(n_obs_g - n_params_g, 1)
             t_stat_g, p_value_g, conf_int_g = safe_inference(att_g, se_g, alpha=self.alpha, df=df_g)
 
@@ -924,11 +985,29 @@ class LWDiD:
                 "availability."
             )
 
-        att_overall, se_overall = self._aggregate_cohort_effects(cohort_effects, total_treated)
+        # Use composite outcome regression (LW 2026 Eq 7.18/7.19) for
+        # the overall ATT and SE when control_group='never_treated' and
+        # estimator='ra' with classical VCE and no controls. This produces
+        # the paper's OLS SE. For non-classical VCE, fall back to delta method.
+        use_composite = (
+            self.control_group == "never_treated"
+            and self.estimator == "ra"
+            and not controls
+            and self.vce == "classical"
+        )
+
+        if use_composite:
+            att_overall, se_overall, df_overall = self._composite_regression_aggregation(
+                df, outcome, unit, time, cohort
+            )
+            df_overall = max(df_overall, 1)
+        else:
+            att_overall, se_overall = self._aggregate_cohort_effects(
+                cohort_effects, total_treated
+            )
+            df_overall = max(sum(e["df"] for e in cohort_effects), 1)
 
         # Step 4: Compute overall inference
-        # Use sum of per-cohort df for the aggregated statistic
-        df_overall = max(sum(e["df"] for e in cohort_effects), 1)
         t_stat, p_value, conf_int = safe_inference(
             att_overall, se_overall, alpha=self.alpha, df=df_overall
         )
@@ -992,12 +1071,499 @@ class LWDiD:
 
         return result
 
+    # ==================================================================
+    # Event Study (Appendix D): WATT(r) + Algorithm 1 sup-t bands
+    # ==================================================================
+
+    def _fit_event_study(
+        self,
+        df: pd.DataFrame,
+        outcome: str,
+        unit: str,
+        time: str,
+        cohort: str,
+        cluster: Optional[str],
+        controls: List[str],
+    ) -> LWDiDResults:
+        """Estimate event-study WATT(r) for each relative period r.
+
+        Implements LW 2025/2026 Appendix D: per-relative-period weighted ATT
+        estimates with Algorithm 1 multiplier bootstrap simultaneous bands.
+        """
+        unique_cohorts = sorted(
+            [g for g in df[cohort].unique() if g > 0 and not np.isnan(g)]
+        )
+        if len(unique_cohorts) == 0:
+            raise ValueError("No treated cohorts found.")
+
+        all_times = sorted(df[time].unique())
+        t_min, t_max = all_times[0], all_times[-1]
+
+        never_treated_mask = (df[cohort] == 0) | df[cohort].isna()
+        never_treated_units = df.loc[never_treated_mask, unit].unique().tolist()
+
+        # Anchor period exclusion
+        if self.rolling in ("demean", "demeanq"):
+            excluded_anchors = {-1}
+        else:
+            excluded_anchors = {-1, -2}
+
+        # Precompute cohort info
+        cohort_units_map = {}
+        cohort_n_map = {}
+        for g in unique_cohorts:
+            g_units = df.loc[df[cohort] == g, unit].unique().tolist()
+            cohort_units_map[g] = g_units
+            cohort_n_map[g] = len(g_units)
+
+        # Determine feasible relative periods
+        all_relative_periods = set()
+        for g in unique_cohorts:
+            for t_val in all_times:
+                r = int(t_val - g)
+                if r in excluded_anchors:
+                    continue
+                if r < 0:
+                    if self.rolling in ("demean", "demeanq") and r > -2:
+                        continue
+                    elif self.rolling in ("detrend", "detrendq") and r > -3:
+                        continue
+                all_relative_periods.add(r)
+
+        sorted_r = sorted(all_relative_periods)
+
+        # Unit indexing for influence functions
+        all_units = df[unit].unique().tolist()
+        unit_to_idx = {u: i for i, u in enumerate(all_units)}
+        n_total_units = len(all_units)
+
+        # Precompute control groups and sub-DataFrames per cohort
+        # Also precompute transformed outcomes per cohort (all times at once)
+        cohort_data_cache = {}  # g -> {t_val: {uid: y_dot}}
+        for g in unique_cohorts:
+            treated_units_g = cohort_units_map[g]
+            pre_periods_g = [t for t in all_times if t < g]
+            if len(pre_periods_g) == 0:
+                continue
+            if self.rolling in ("detrend", "detrendq") and len(pre_periods_g) < 2:
+                continue
+
+            # Determine control units for each target time
+            # For efficiency, compute the superset (never_treated + all later cohorts)
+            if self.control_group == "never_treated":
+                control_units_g = never_treated_units
+            else:
+                # Will filter per time in the loop
+                control_units_g = (
+                    df.loc[
+                        (df[cohort] == 0) | df[cohort].isna() | (df[cohort] > g),
+                        unit,
+                    ].unique().tolist()
+                )
+
+            if len(control_units_g) == 0:
+                continue
+
+            relevant_units = list(set(treated_units_g + control_units_g))
+            sub_df = df.loc[df[unit].isin(relevant_units)].copy()
+
+            # Precompute post-treatment transform for all post times
+            # For demean: pre-mean per unit (one computation for all post times)
+            cache_g = {}
+            if self.rolling in ("demean", "demeanq"):
+                pre_data = sub_df[sub_df[time].isin(pre_periods_g)]
+                pre_means = pre_data.groupby(unit)[outcome].mean()
+                for t_val in all_times:
+                    r = int(t_val - g)
+                    if r in excluded_anchors:
+                        continue
+                    if r >= 0:
+                        # Post: Y_t - pre_mean
+                        t_data = sub_df[sub_df[time] == t_val].set_index(unit)[outcome]
+                        common = t_data.index.intersection(pre_means.index)
+                        if len(common) > 0:
+                            cache_g[t_val] = dict(zip(common, (t_data[common] - pre_means[common]).values))
+                    elif r <= -2:
+                        # Pre: Appendix D.1 forward-looking
+                        t_data = sub_df[sub_df[time] == t_val].set_index(unit)[outcome]
+                        future_data = sub_df[(sub_df[time] > t_val) & (sub_df[time] < g)]
+                        if len(future_data) > 0:
+                            future_means = future_data.groupby(unit)[outcome].mean()
+                            common = t_data.index.intersection(future_means.index)
+                            if len(common) > 0:
+                                cache_g[t_val] = dict(zip(common, (t_data[common] - future_means[common]).values))
+            else:  # detrend
+                # Pre-compute per-unit trend coefficients
+                pre_data = sub_df[sub_df[time].isin(pre_periods_g)]
+                unit_betas = {}  # uid -> (beta0, beta1, t_mean)
+                for uid, grp in pre_data.groupby(unit):
+                    pre_t = grp[time].to_numpy(dtype=np.float64)
+                    pre_y = grp[outcome].to_numpy(dtype=np.float64)
+                    if len(pre_t) < 2:
+                        continue
+                    t_mean = pre_t.mean()
+                    X_pre = np.column_stack([np.ones(len(pre_t)), pre_t - t_mean])
+                    beta, *_ = np.linalg.lstsq(X_pre, pre_y, rcond=None)
+                    unit_betas[uid] = (beta[0], beta[1], t_mean)
+
+                for t_val in all_times:
+                    r = int(t_val - g)
+                    if r in excluded_anchors:
+                        continue
+                    if r >= 0:
+                        # Post: Y_t - (alpha + beta*(t - t_mean))
+                        t_data = sub_df[sub_df[time] == t_val].set_index(unit)[outcome]
+                        cell = {}
+                        for uid in t_data.index:
+                            if uid in unit_betas:
+                                b0, b1, tm = unit_betas[uid]
+                                y_hat = b0 + b1 * (float(t_val) - tm)
+                                cell[uid] = float(t_data[uid]) - y_hat
+                        if cell:
+                            cache_g[t_val] = cell
+                    elif r <= -3:
+                        # Pre: Appendix D.2 forward-looking detrend
+                        t_data = sub_df[sub_df[time] == t_val].set_index(unit)[outcome]
+                        future_data = sub_df[(sub_df[time] > t_val) & (sub_df[time] < g)]
+                        if len(future_data) == 0:
+                            continue
+                        cell = {}
+                        for uid, grp in future_data.groupby(unit):
+                            if uid not in t_data.index:
+                                continue
+                            if len(grp) < 2:
+                                continue
+                            ft = grp[time].to_numpy(dtype=np.float64)
+                            fy = grp[outcome].to_numpy(dtype=np.float64)
+                            tm = ft.mean()
+                            Xf = np.column_stack([np.ones(len(ft)), ft - tm])
+                            beta, *_ = np.linalg.lstsq(Xf, fy, rcond=None)
+                            y_hat_t = beta[0] + beta[1] * (float(t_val) - tm)
+                            cell[uid] = float(t_data[uid]) - y_hat_t
+                        if cell:
+                            cache_g[t_val] = cell
+
+            cohort_data_cache[g] = cache_g
+
+        # Compute WATT(r) and influence functions
+        event_study_effects = {}
+        if_matrix = {}  # r -> IF vector of shape (n_total_units,)
+
+        for r in sorted_r:
+            cohorts_r = []
+            for g in unique_cohorts:
+                t_val = g + r
+                if t_val < t_min or t_val > t_max:
+                    continue
+                if r < 0:
+                    if self.rolling in ("demean", "demeanq") and r > -2:
+                        continue
+                    elif self.rolling in ("detrend", "detrendq") and r > -3:
+                        continue
+                cohorts_r.append(g)
+
+            if not cohorts_r:
+                continue
+
+            att_cells = []
+            for g in cohorts_r:
+                t_val = g + r
+                treated_units_g = cohort_units_map[g]
+                n_g = cohort_n_map[g]
+
+                # Use precomputed cache
+                if g not in cohort_data_cache:
+                    continue
+                if t_val not in cohort_data_cache[g]:
+                    continue
+                y_dot_at_t = cohort_data_cache[g][t_val]
+
+                # Filter to not-yet-treated control at time t_val
+                if self.control_group != "never_treated":
+                    # For not_yet_treated: only keep control units with cohort > t_val
+                    valid_controls = set(
+                        df.loc[
+                            (df[cohort] == 0) | df[cohort].isna() | (df[cohort] > t_val),
+                            unit,
+                        ].unique()
+                    )
+                    treated_set_g = set(treated_units_g)
+                    y_dot_at_t = {u: v for u, v in y_dot_at_t.items()
+                                  if u in treated_set_g or u in valid_controls}
+
+                if len(y_dot_at_t) == 0:
+                    continue
+
+                # Build cross-section
+                cs_units = list(y_dot_at_t.keys())
+                y_vec = np.array([y_dot_at_t[u] for u in cs_units], dtype=np.float64)
+                treat_vec = np.array(
+                    [1.0 if u in set(treated_units_g) else 0.0 for u in cs_units],
+                    dtype=np.float64,
+                )
+
+                if treat_vec.sum() == 0 or treat_vec.sum() == len(treat_vec):
+                    continue
+
+                valid_mask = np.isfinite(y_vec)
+                if valid_mask.sum() < 3:
+                    continue
+                y_vec = y_vec[valid_mask]
+                treat_vec = treat_vec[valid_mask]
+                cs_units = [cs_units[i] for i in range(len(valid_mask)) if valid_mask[i]]
+
+                controls_matrix_g = None
+                if controls:
+                    ctrl_df = sub_df.drop_duplicates(subset=[unit], keep="first").set_index(unit)
+                    ctrl_vals = []
+                    for u in cs_units:
+                        if u in ctrl_df.index:
+                            ctrl_vals.append(ctrl_df.loc[u, controls].values.astype(np.float64))
+                        else:
+                            ctrl_vals.append(np.full(len(controls), np.nan))
+                    controls_matrix_g = np.array(ctrl_vals)
+
+                att_g_r, se_g_r, coefs_g_r, vcov_g_r, n_params = self._dispatch_estimator(
+                    y_vec, treat_vec, controls_matrix_g, None, len(y_vec)
+                )
+
+                if not np.isfinite(att_g_r):
+                    continue
+
+                # Influence function for ATT coefficient
+                n_cs = len(y_vec)
+                if controls_matrix_g is not None:
+                    X_cs = np.column_stack([np.ones(n_cs), treat_vec, controls_matrix_g])
+                else:
+                    X_cs = np.column_stack([np.ones(n_cs), treat_vec])
+
+                if coefs_g_r is not None:
+                    resid = y_vec - X_cs @ coefs_g_r
+                else:
+                    resid = y_vec - (np.mean(y_vec[treat_vec == 0]) + att_g_r * treat_vec)
+
+                try:
+                    XtX_inv = np.linalg.pinv(X_cs.T @ X_cs / n_cs)
+                except np.linalg.LinAlgError:
+                    XtX_inv = np.eye(X_cs.shape[1])
+                e_treat = np.zeros(X_cs.shape[1])
+                e_treat[1] = 1.0
+                bread = e_treat @ XtX_inv
+                if_per_unit = (X_cs @ bread) * resid / n_cs
+
+                att_cells.append({
+                    "att": att_g_r,
+                    "n_g": n_g,
+                    "if_per_unit": if_per_unit,
+                    "cs_units": cs_units,
+                })
+
+            if not att_cells:
+                continue
+
+            # Aggregate WATT(r)
+            total_n_r = sum(c["n_g"] for c in att_cells)
+            watt_r = sum(c["att"] * c["n_g"] / total_n_r for c in att_cells)
+
+            # Combine influence functions
+            if_combined = np.zeros(n_total_units)
+            for cell in att_cells:
+                w_g = cell["n_g"] / total_n_r
+                for i, u in enumerate(cell["cs_units"]):
+                    if u in unit_to_idx:
+                        if_combined[unit_to_idx[u]] += w_g * cell["if_per_unit"][i]
+
+            # SE from IF
+            se_r = float(np.sqrt(np.sum(if_combined**2)))
+            if se_r <= 0 or not np.isfinite(se_r):
+                se_r = np.nan
+
+            # Pointwise inference
+            if np.isfinite(se_r) and se_r > 0:
+                t_stat_r = watt_r / se_r
+                p_value_r = float(2 * (1 - _scipy_norm.cdf(abs(t_stat_r))))
+                z_crit = _scipy_norm.ppf(1 - self.alpha / 2)
+                ci_r = (watt_r - z_crit * se_r, watt_r + z_crit * se_r)
+            else:
+                t_stat_r = np.nan
+                p_value_r = np.nan
+                ci_r = (np.nan, np.nan)
+
+            event_study_effects[r] = {
+                "effect": watt_r,
+                "se": se_r,
+                "t_stat": t_stat_r,
+                "p_value": p_value_r,
+                "conf_int": ci_r,
+            }
+            if_matrix[r] = if_combined
+
+        # Algorithm 1: Multiplier bootstrap sup-t bands
+        n_bootstrap = self.n_bootstrap
+        cband_method = None
+        cband_crit_value = None
+        cband_n_bootstrap = None
+
+        if n_bootstrap > 0 and len(if_matrix) > 1:
+            rng = np.random.default_rng(self.bootstrap_seed)
+            valid_r = [r for r in sorted(if_matrix.keys())
+                       if r in event_study_effects
+                       and np.isfinite(event_study_effects[r]["se"])
+                       and event_study_effects[r]["se"] > 0]
+
+            if len(valid_r) > 0:
+                if_stack = np.column_stack([if_matrix[r] for r in valid_r])
+                se_vec = np.array([event_study_effects[r]["se"] for r in valid_r])
+
+                # Bootstrap replications for SE and sup-t
+                boot_deltas = np.empty((n_bootstrap, len(valid_r)))
+                sup_t_stats = np.empty(n_bootstrap)
+                for b in range(n_bootstrap):
+                    eps = rng.choice([-1.0, 1.0], size=n_total_units)
+                    delta_b = eps @ if_stack
+                    boot_deltas[b] = delta_b
+                    t_b = np.abs(delta_b) / se_vec
+                    sup_t_stats[b] = np.max(t_b)
+
+                # Bootstrap SE (replace analytic SE)
+                boot_se = np.std(boot_deltas, axis=0, ddof=1)
+
+                # sup-t critical value
+                # Recompute sup-t using bootstrap SEs
+                se_vec_boot = boot_se.copy()
+                se_vec_boot[se_vec_boot <= 0] = np.inf
+                sup_t_stats_2 = np.empty(n_bootstrap)
+                for b in range(n_bootstrap):
+                    t_b2 = np.abs(boot_deltas[b]) / se_vec_boot
+                    sup_t_stats_2[b] = np.max(t_b2)
+
+                cband_crit_value = float(np.quantile(sup_t_stats_2, 1 - self.alpha))
+                cband_method = "multiplier_bootstrap_sup_t"
+                cband_n_bootstrap = n_bootstrap
+
+                # Update SEs and CIs with bootstrap values
+                for i_r, r in enumerate(valid_r):
+                    bse = float(boot_se[i_r])
+                    if bse > 0:
+                        eff_val = event_study_effects[r]["effect"]
+                        event_study_effects[r]["se"] = bse
+                        event_study_effects[r]["t_stat"] = eff_val / bse
+                        event_study_effects[r]["p_value"] = float(
+                            2 * (1 - _scipy_norm.cdf(abs(eff_val / bse)))
+                        )
+                        z_crit = _scipy_norm.ppf(1 - self.alpha / 2)
+                        event_study_effects[r]["conf_int"] = (
+                            eff_val - z_crit * bse,
+                            eff_val + z_crit * bse,
+                        )
+                        event_study_effects[r]["cband_conf_int"] = (
+                            eff_val - cband_crit_value * bse,
+                            eff_val + cband_crit_value * bse,
+                        )
+
+        # Overall ATT (simple average of post-treatment WATT(r))
+        post_effects = {r: e for r, e in event_study_effects.items() if r >= 0}
+        if post_effects:
+            att_overall = float(np.mean([e["effect"] for e in post_effects.values()]))
+        else:
+            att_overall = np.nan
+        se_overall = np.nan
+        t_stat_ov, p_value_ov, conf_int_ov = np.nan, np.nan, (np.nan, np.nan)
+
+        n_obs_total = len(all_units)
+        n_treated_total = sum(cohort_n_map.values())
+        n_control_total = len(never_treated_units)
+
+        result = LWDiDResults(
+            att=att_overall,
+            se=se_overall,
+            t_stat=t_stat_ov,
+            p_value=p_value_ov,
+            conf_int=conf_int_ov,
+            n_obs=n_obs_total,
+            n_treated=n_treated_total,
+            n_control=n_control_total,
+            rolling=self.rolling,
+            estimator=self.estimator,
+            vce_type=self.vce,
+            alpha=self.alpha,
+            event_study_effects=event_study_effects,
+            cband_method=cband_method,
+            cband_crit_value=cband_crit_value,
+            cband_n_bootstrap=cband_n_bootstrap,
+        )
+        return result
+
+    def _es_transform_post(self, sub_df, outcome, unit, time, pre_periods, target_time):
+        """Standard rolling transformation evaluated at a specific post-treatment time."""
+        pre_set = set(pre_periods)
+        # Get outcome at target time for each unit
+        target_data = sub_df[sub_df[time] == target_time].set_index(unit)[outcome]
+        # Get pre-period data
+        pre_data = sub_df[sub_df[time].isin(pre_set)]
+
+        if self.rolling in ("demean", "demeanq"):
+            pre_means = pre_data.groupby(unit)[outcome].mean()
+            # Only keep units with both target and pre data
+            common = target_data.index.intersection(pre_means.index)
+            return dict(zip(common, (target_data[common] - pre_means[common]).values))
+        else:  # detrend, detrendq
+            result = {}
+            pre_grouped = pre_data.groupby(unit)
+            for uid, grp in pre_grouped:
+                if uid not in target_data.index:
+                    continue
+                pre_t = grp[time].to_numpy(dtype=np.float64)
+                pre_y = grp[outcome].to_numpy(dtype=np.float64)
+                if len(pre_t) < 2:
+                    continue
+                t_mean = pre_t.mean()
+                X_pre = np.column_stack([np.ones(len(pre_t)), pre_t - t_mean])
+                beta, *_ = np.linalg.lstsq(X_pre, pre_y, rcond=None)
+                y_hat = beta[0] + beta[1] * (float(target_time) - t_mean)
+                result[uid] = float(target_data[uid]) - y_hat
+            return result
+
+    def _es_transform_pre(self, sub_df, outcome, unit, time, cohort_g, target_time):
+        """Appendix D forward-looking transformation for pre-treatment periods.
+
+        D.1 (demean): Y_dot = Y_t - mean(Y_q for q in {t+1, ..., g-1})
+        D.2 (detrend): Y_dot = Y_t - fitted(Y on q for q in {t+1, ..., g-1})
+        """
+        # Target time outcome
+        target_data = sub_df[sub_df[time] == target_time].set_index(unit)[outcome]
+        # Future pre-treatment periods: q in (target_time, cohort_g)
+        future_data = sub_df[(sub_df[time] > target_time) & (sub_df[time] < cohort_g)]
+
+        if self.rolling in ("demean", "demeanq"):
+            future_means = future_data.groupby(unit)[outcome].mean()
+            common = target_data.index.intersection(future_means.index)
+            if len(common) == 0:
+                return {}
+            return dict(zip(common, (target_data[common] - future_means[common]).values))
+        else:  # detrend, detrendq
+            result = {}
+            future_grouped = future_data.groupby(unit)
+            for uid, grp in future_grouped:
+                if uid not in target_data.index:
+                    continue
+                if len(grp) < 2:
+                    continue
+                future_t = grp[time].to_numpy(dtype=np.float64)
+                future_y = grp[outcome].to_numpy(dtype=np.float64)
+                t_mean = future_t.mean()
+                X_f = np.column_stack([np.ones(len(future_t)), future_t - t_mean])
+                beta, *_ = np.linalg.lstsq(X_f, future_y, rcond=None)
+                y_hat_t = beta[0] + beta[1] * (float(target_time) - t_mean)
+                result[uid] = float(target_data[uid]) - y_hat_t
+            return result
+
     def _aggregate_cohort_effects(
         self,
         cohort_effects: List[Dict[str, Any]],
         total_treated: int,
     ) -> Tuple[float, float]:
-        """Aggregate per-cohort ATTs via cohort-size weighting.
+        """Aggregate per-cohort ATTs via cohort-size weighting (delta method).
 
         Parameters
         ----------
@@ -1040,6 +1606,118 @@ class LWDiD:
             se = np.nan
 
         return att, se
+
+    def _composite_regression_aggregation(
+        self,
+        df: pd.DataFrame,
+        outcome: str,
+        unit: str,
+        time: str,
+        cohort: str,
+    ) -> Tuple[float, float, int]:
+        """Compute tau_omega via composite outcome regression (LW 2026 Eq 7.18/7.19).
+
+        For staggered designs, constructs a composite outcome vector:
+        - Treated units in cohort g: use their cohort's transformed outcome
+        - Never-treated units: weighted average of all cohort transformations
+        Then runs a single cross-sectional OLS: y_composite ~ [1, D_ever_treated]
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Full panel data.
+        outcome : str
+            Outcome variable column.
+        unit : str
+            Unit identifier column.
+        time : str
+            Time period column.
+        cohort : str
+            Cohort (first treatment time) column.
+
+        Returns
+        -------
+        att : float
+            ATT from composite regression coefficient on D.
+        se : float
+            Classical OLS SE from composite regression.
+        dof : int
+            Degrees of freedom (n_units - 2).
+        """
+        # Step 1: Identify cohorts and unit membership
+        fy = df.groupby(unit)[cohort].first()
+        cohorts = sorted([g for g in fy.unique() if g > 0 and not np.isnan(g)])
+        n_treat = int((fy > 0).sum())
+
+        if n_treat == 0:
+            return np.nan, np.nan, 0
+
+        # Step 2: For each cohort g, compute per-unit post-average transformed outcome
+        # using cohort g's pre-period for ALL units
+        ydot_by_cohort: Dict[Any, pd.Series] = {}
+        for g in cohorts:
+            # pre_mask: periods < g (i.e., time <= g-1)
+            pre_mask_g = df[time] < g
+            post_mask_g = df[time] >= g
+
+            # Apply transformation to full dataset
+            if self.rolling in ("demean", "demeanq"):
+                df_transformed = self._transform_demean(df, outcome, unit, pre_mask_g)
+            elif self.rolling in ("detrend", "detrendq"):
+                df_transformed = self._transform_detrend(df, outcome, unit, time, pre_mask_g)
+            else:
+                df_transformed = self._transform_demean(df, outcome, unit, pre_mask_g)
+
+            # Per-unit average of transformed outcome in post-periods (>= g)
+            post_data = df_transformed.loc[post_mask_g]
+            unit_avg_g = post_data.groupby(unit)["_ydot"].mean()
+            ydot_by_cohort[g] = unit_avg_g
+
+        # Step 3: Assemble composite outcome vector
+        all_units = fy.index
+        n_units = len(all_units)
+        y_composite = np.empty(n_units, dtype=np.float64)
+        d_ever_treated = np.empty(n_units, dtype=np.float64)
+
+        # Compute cohort sizes for weights
+        cohort_sizes = {g: int((fy == g).sum()) for g in cohorts}
+
+        for i, u in enumerate(all_units):
+            g_u = fy[u]
+            if g_u > 0:  # Treated unit
+                y_composite[i] = ydot_by_cohort[g_u].get(u, np.nan)
+                d_ever_treated[i] = 1.0
+            else:  # Never-treated (control) unit
+                weighted_sum = 0.0
+                for g in cohorts:
+                    w_g = cohort_sizes[g] / n_treat
+                    weighted_sum += w_g * ydot_by_cohort[g].get(u, 0.0)
+                y_composite[i] = weighted_sum
+                d_ever_treated[i] = 0.0
+
+        # Step 4: Single OLS regression y_composite ~ [1, D]
+        # Drop any NaN observations
+        valid = np.isfinite(y_composite)
+        y_valid = y_composite[valid]
+        d_valid = d_ever_treated[valid]
+        n = len(y_valid)
+
+        if n < 3:
+            return np.nan, np.nan, 0
+
+        X = np.column_stack([np.ones(n, dtype=np.float64), d_valid])
+        beta, *_ = np.linalg.lstsq(X, y_valid, rcond=None)
+        resid = y_valid - X @ beta
+        k = 2
+        dof = n - k
+        sigma2 = float(resid @ resid) / dof
+        XtX_inv = np.linalg.inv(X.T @ X)
+        cov = sigma2 * XtX_inv
+
+        att = float(beta[1])
+        se = float(np.sqrt(cov[1, 1]))
+
+        return att, se, dof
 
     def _transform_demean(
         self,
@@ -2013,7 +2691,16 @@ class LWDiD:
             )
 
         # Step 2: Trim propensity scores to [trim_threshold, 1 - trim_threshold]
-        probs = np.clip(probs, self.trim_threshold, 1.0 - self.trim_threshold)
+        trim_lo, trim_hi = self.trim_threshold, 1.0 - self.trim_threshold
+        n_trimmed = int((probs < trim_lo).sum() + (probs > trim_hi).sum())
+        if n_trimmed > 0:
+            warnings.warn(
+                f"LWDiD: {n_trimmed} observation(s) had propensity scores trimmed "
+                f"to [{self.trim_threshold:.3f}, {1-self.trim_threshold:.3f}].",
+                UserWarning,
+                stacklevel=2,
+            )
+        probs = np.clip(probs, trim_lo, trim_hi)
 
         # Step 3: Compute IPW weights
         # For treated: weight = 1
@@ -2055,8 +2742,8 @@ class LWDiD:
         w_ctrl = ipw_weights[ctrl_mask]  # p/(1-p) for controls
 
         psi_ht = np.zeros(n_obs)
-        psi_ht[treat_mask] = (y[treat_mask] - att) / p_bar
-        psi_ht[ctrl_mask] = -w_ctrl * y[ctrl_mask] / p_bar
+        psi_ht[treat_mask] = (y[treat_mask] - att_treated) / p_bar
+        psi_ht[ctrl_mask] = -w_ctrl * (y[ctrl_mask] - att_control) / p_bar
 
         # --- Propensity score estimation uncertainty correction ---
         # Design matrix with intercept (solve_logit adds intercept internally,
@@ -2076,10 +2763,13 @@ class LWDiD:
 
         # Sensitivity: dATT/dgamma
         # dw/dgamma_i = w_i * X_i (logit chain rule)
-        # dATT/dgamma = -(1/(n*p_bar)) * sum_ctrl(w_i * X_i * Y_i)
+        # dATT/dgamma = -(1/w_sum) * sum_ctrl(w_i * X_i * (Y_i - mu_0))
+        # The (Y_i - mu_0) centering comes from the quotient rule for the
+        # Hajek estimator (d/dgamma of Sigma(wY)/Sigma(w)) and ensures
+        # translation invariance of the resulting SE.
         dw_dgamma_ctrl = w_ctrl[:, np.newaxis] * X_ps[ctrl_mask]
-        Y_ctrl = y[ctrl_mask]
-        dATT_dgamma = -(dw_dgamma_ctrl * Y_ctrl[:, np.newaxis]).sum(axis=0) / (n_obs * p_bar)
+        Y_ctrl_centered = (y[ctrl_mask] - att_control)
+        dATT_dgamma = -(dw_dgamma_ctrl * Y_ctrl_centered[:, np.newaxis]).sum(axis=0) / (n_obs * p_bar)
 
         # PS adjustment: psi_adj_i = (S_i @ H^{-1}) @ dATT_dgamma
         ps_adjustment = (S_gamma @ H_gamma_inv.T) @ dATT_dgamma
@@ -2201,7 +2891,16 @@ class LWDiD:
             )
 
         # Step 2: Trim propensity scores to [trim_threshold, 1 - trim_threshold]
-        probs = np.clip(probs, self.trim_threshold, 1.0 - self.trim_threshold)
+        trim_lo, trim_hi = self.trim_threshold, 1.0 - self.trim_threshold
+        n_trimmed = int((probs < trim_lo).sum() + (probs > trim_hi).sum())
+        if n_trimmed > 0:
+            warnings.warn(
+                f"LWDiD: {n_trimmed} observation(s) had propensity scores trimmed "
+                f"to [{self.trim_threshold:.3f}, {1-self.trim_threshold:.3f}].",
+                UserWarning,
+                stacklevel=2,
+            )
+        probs = np.clip(probs, trim_lo, trim_hi)
 
         # Step 3: Nearest-neighbor matching (with replacement)
         p_treated = probs[treat_mask]
@@ -2238,6 +2937,14 @@ class LWDiD:
         # Step 4: Compute ATT = mean(Y_treated - Y_matched_control)
         # Exclude NaN matches (from caliper)
         valid_matches = np.isfinite(matched_y_control)
+        n_unmatched = int(np.isnan(matched_y_control).sum())
+        if n_unmatched > 0:
+            warnings.warn(
+                f"LWDiD PSM: {n_unmatched} treated unit(s) could not be matched "
+                f"within caliper={self.caliper}. ATT computed from {n_treated - n_unmatched} matches.",
+                UserWarning,
+                stacklevel=2,
+            )
         if not valid_matches.any():
             warnings.warn(
                 "PSM estimation failed: no valid matches found (all exceeded caliper). "
@@ -2335,6 +3042,15 @@ class LWDiD:
                 stacklevel=2,
             )
 
+        trim_lo_ipwra, trim_hi_ipwra = self.trim_threshold, 1.0 - self.trim_threshold
+        n_trimmed_ipwra = int((probs < trim_lo_ipwra).sum() + (probs > trim_hi_ipwra).sum())
+        if n_trimmed_ipwra > 0:
+            warnings.warn(
+                f"LWDiD: {n_trimmed_ipwra} observation(s) had propensity scores trimmed "
+                f"to [{self.trim_threshold:.3f}, {1-self.trim_threshold:.3f}].",
+                UserWarning,
+                stacklevel=2,
+            )
         probs = np.clip(probs, self.trim_threshold, 1.0 - self.trim_threshold)
 
         # Step 2: Fit outcome model on control units only using WLS with IPW weights
@@ -2832,6 +3548,14 @@ class LWDiD:
                 boot_atts = np.array(list(executor.map(_run_replicate, range(self.n_bootstrap))))
 
         # Compute bootstrap SE
+        n_failed = int(np.isnan(boot_atts).sum())
+        if n_failed > 0:
+            warnings.warn(
+                f"LWDiD bootstrap: {n_failed}/{self.n_bootstrap} replication(s) failed "
+                f"(returned NaN). Results based on {self.n_bootstrap - n_failed} valid replications.",
+                UserWarning,
+                stacklevel=2,
+            )
         valid_boots = boot_atts[np.isfinite(boot_atts)]
         if len(valid_boots) < 2:
             se = np.nan
@@ -3136,6 +3860,16 @@ def lwdid(
     # Handle lwdid-py parameter alias: cluster_var -> cluster
     if cluster is None and "cluster_var" in kwargs:
         cluster = kwargs.pop("cluster_var")
+
+    # Reject unknown keyword arguments
+    _valid_lwdid_params = set(LWDiD().get_params().keys())
+    unknown = {k for k in kwargs if k not in _valid_lwdid_params}
+    if unknown:
+        raise ValueError(
+            f"lwdid() received unexpected keyword arguments: {sorted(unknown)}. "
+            f"Check parameter names — did you mean one of: "
+            f"{sorted(_valid_lwdid_params)}?"
+        )
 
     # Map VCE (handle lwdid-py aliases)
     _vce_aliases = {"robust": "hc1", "ols": "classical", None: "classical"}

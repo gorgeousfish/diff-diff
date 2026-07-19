@@ -15,7 +15,10 @@ from typing import Optional
 
 import numpy as np
 
-from diff_diff.lwdid_exceptions import RandomizationError, RandomizationWarning
+from diff_diff.lwdid_exceptions import RandomizationWarning
+
+# Backward compat alias
+RandomizationError = ValueError
 
 
 @dataclass
@@ -71,38 +74,38 @@ def _validate_inputs(
         If any validation check fails.
     """
     if n_reps is None or n_reps <= 0:
-        raise RandomizationError("n_reps must be a positive integer")
+        raise ValueError("n_reps must be a positive integer")
 
     if method not in ("permutation", "bootstrap"):
-        raise RandomizationError(f"method must be 'permutation' or 'bootstrap', got '{method}'")
+        raise ValueError(f"method must be 'permutation' or 'bootstrap', got '{method}'")
 
     if y.ndim != 1:
-        raise RandomizationError(f"y must be a 1-d array, got shape {y.shape}")
+        raise ValueError(f"y must be a 1-d array, got shape {y.shape}")
 
     if treatment.ndim != 1:
-        raise RandomizationError(f"treatment must be a 1-d array, got shape {treatment.shape}")
+        raise ValueError(f"treatment must be a 1-d array, got shape {treatment.shape}")
 
     if len(y) == 0:
-        raise RandomizationError("y must not be empty.")
+        raise ValueError("y must not be empty.")
 
     if len(y) != len(treatment):
-        raise RandomizationError(
+        raise ValueError(
             f"y and treatment must have the same length, " f"got {len(y)} and {len(treatment)}"
         )
 
     n = len(y)
     if n < 3:
-        raise RandomizationError(f"Sample size too small for randomization inference: N={n}")
+        raise ValueError(f"Sample size too small for randomization inference: N={n}")
 
     if not np.all((treatment == 0) | (treatment == 1)):
-        raise RandomizationError(
+        raise ValueError(
             "treatment must be binary (0 or 1). "
             f"Got values in [{treatment.min()}, {treatment.max()}]."
         )
 
     n1 = int(treatment.sum())
     if n1 == 0 or n1 == n:
-        raise RandomizationError(
+        raise ValueError(
             "Treatment variable is constant (all treated or all control). "
             "Randomization inference requires variation in treatment."
         )
@@ -111,9 +114,9 @@ def _validate_inputs(
         if controls.ndim == 1:
             controls = controls.reshape(-1, 1)
         if controls.shape[0] != n:
-            raise RandomizationError(f"controls must have {n} rows, got {controls.shape[0]}")
+            raise ValueError(f"controls must have {n} rows, got {controls.shape[0]}")
         if not np.all(np.isfinite(controls)):
-            raise RandomizationError(
+            raise ValueError(
                 "controls contains non-finite values (NaN or Inf). "
                 "Please remove or impute missing values before calling "
                 "randomization_inference()."
@@ -229,8 +232,11 @@ def _slow_path(
 def _compute_pvalue(att_dist: np.ndarray, att_obs: float) -> tuple:
     """Compute two-sided p-value from randomization distribution.
 
-    Uses the formula: p = (sum(|ATT*| >= |ATT_obs|) + 1) / (n_valid + 1)
-    which provides a conservative estimate and avoids p=0.
+    Uses the formula: p = (sum(|ATT*| > |ATT_obs|) + 1) / (n_valid + 1)
+    following Phipson & Smyth (2010).  The strict inequality avoids
+    double-counting permutations that reproduce the observed assignment
+    (ties), while the +1 in numerator and denominator accounts for the
+    observed statistic itself and guarantees p > 0.
 
     Returns
     -------
@@ -246,7 +252,7 @@ def _compute_pvalue(att_dist: np.ndarray, att_obs: float) -> tuple:
         return 1.0, 0, n_failed
 
     valid_atts = att_dist[valid_mask]
-    pvalue = float((np.sum(np.abs(valid_atts) >= np.abs(att_obs)) + 1) / (n_valid + 1))
+    pvalue = float((np.sum(np.abs(valid_atts) > np.abs(att_obs)) + 1) / (n_valid + 1))
     return pvalue, n_valid, n_failed
 
 
@@ -305,10 +311,12 @@ def randomization_inference(
     -----
     The p-value is computed as:
 
-        p = (sum(|ATT*| >= |ATT_obs|) + 1) / (n_valid + 1)
+        p = (sum(|ATT*| > |ATT_obs|) + 1) / (n_valid + 1)
 
-    This conservative formula ensures the p-value is strictly positive
-    and provides valid finite-sample inference.
+    following Phipson & Smyth (2010).  The strict inequality avoids
+    double-counting permutations that reproduce the observed treatment
+    assignment exactly (ties), while the +1 ensures the p-value is
+    strictly positive and provides valid finite-sample inference.
 
     When controls are absent, ATT is computed directly as the difference
     in means between treated and control groups. With controls, a
@@ -384,7 +392,7 @@ def randomization_inference(
 
     # Error if too few valid replications
     if n_valid < max(10, int(0.1 * n_reps)):
-        raise RandomizationError(
+        raise ValueError(
             f"Insufficient valid replications for reliable inference: "
             f"{n_valid}/{n_reps} valid (failure rate {failure_rate:.1%}). "
             f"Use method='permutation' to avoid degenerate draws."

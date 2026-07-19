@@ -102,6 +102,14 @@ class LWDiDResults:
     period_effects: Optional[Dict[Any, Dict]] = field(default=None, repr=False)
 
     # ------------------------------------------------------------------ #
+    # Event study (Appendix D) fields                                     #
+    # ------------------------------------------------------------------ #
+    event_study_effects: Optional[Dict[int, Dict]] = field(default=None, repr=False)
+    cband_method: Optional[str] = field(default=None, repr=False)
+    cband_crit_value: Optional[float] = field(default=None, repr=False)
+    cband_n_bootstrap: Optional[int] = field(default=None, repr=False)
+
+    # ------------------------------------------------------------------ #
     # Full regression output (optional)                                   #
     # ------------------------------------------------------------------ #
     params: Optional[np.ndarray] = field(default=None, repr=False)

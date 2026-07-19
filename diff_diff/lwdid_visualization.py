@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from diff_diff.lwdid_exceptions import VisualizationError
+from diff_diff.lwdid_exceptions import VisualizationError  # noqa: F401 - backward compat
 
 
 def _require_matplotlib():
@@ -27,7 +27,7 @@ def _require_matplotlib():
 
         return plt
     except ImportError:
-        raise VisualizationError(
+        raise ImportError(
             "matplotlib is required for LWDiD visualization. "
             "Install with: pip install matplotlib"
         )

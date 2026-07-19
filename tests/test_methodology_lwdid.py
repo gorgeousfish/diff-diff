@@ -302,16 +302,6 @@ class TestProp99Table3Goldens:
         res = _fit_prop99(prop99, "detrend")
         np.testing.assert_allclose(res.p_value, TABLE3_DETREND_EXACT_P, atol=PRINTED_ATOL)
 
-    @pytest.mark.xfail(
-        strict=False,
-        reason="PR #588 step-2 discussion: RI p-value convention diverges "
-        "from LW 2026 Table 3 Note 2 (implementation gives the seed-stable "
-        "~2/39 two-sided exact permutation atom for N1=1 among 39 states - "
-        "arguably the standard exact answer - vs the paper's 0.020, whose "
-        "permutation scheme is under-documented; see the maintainer review "
-        "doc Gaps section). Reconcile against the authors' Stata "
-        "`lwdid, ri` behavior.",
-    )
     def test_detrend_randomization_inference_p_value(self, prop99):
         from diff_diff.lwdid_randomization import randomization_inference
 
@@ -435,14 +425,6 @@ class TestCastleTauOmegaAdjudicator:
         res = self._fit(castle, "demean")
         np.testing.assert_allclose(res.att, CASTLE_TAU_DEMEAN[0], atol=PRINTED_ATOL)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="PR #588 step-2 aggregation: the overall SE must come from the "
-        "composite-outcome regression (7.18)/(7.19) (paper OLS SE 0.057; "
-        "implementation's independence-across-cohorts SE gives 0.051). "
-        "Remove this marker in the commit that adopts the composite "
-        "regression.",
-    )
     def test_demean_tau_omega_ols_se(self, castle):
         res = self._fit(castle, "demean")
         np.testing.assert_allclose(res.se, CASTLE_TAU_DEMEAN[1], atol=PRINTED_ATOL)
@@ -482,7 +464,6 @@ class TestTranslationInvariance:
         r1, r2 = self._fit_pair(estimator)
         np.testing.assert_allclose(r1.se, r2.se, rtol=0, atol=1e-10)
 
-    @XFAIL_IPW_CENTERING
     def test_ipw_se_translation_invariant(self):
         r1, r2 = self._fit_pair("ipw")
         np.testing.assert_allclose(r1.se, r2.se, rtol=0, atol=1e-10)
@@ -622,11 +603,6 @@ class TestExactSmallSampleInference:
         p_expected = 2 * stats.t.sf(abs(res.t_stat), n - 2)
         np.testing.assert_allclose(res.p_value, p_expected, rtol=1e-10)
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="PR #588 step-2: no N_infinity >= 2 guard exists for the "
-        "never-treated-only staggered control strategy (LW 2026, p26).",
-    )
     def test_never_treated_pool_of_one_is_rejected(self):
         df = _synthetic_staggered(n_units=30, nt_share=0.0, seed=5)
         # Force exactly one never-treated unit
@@ -688,7 +664,6 @@ class TestEventStudySpec:
             aggregate="event_study",
         )
 
-    @XFAIL_EVENT_STUDY
     @pytest.mark.parametrize(
         "outcome,table_key",
         [
@@ -701,8 +676,10 @@ class TestEventStudySpec:
         "rolling,estimator,column",
         [
             ("detrend", "ra", "rolling_ra_detrend"),
-            ("detrend", "ipwra", "rolling_ipwra_detrend"),
-            ("demean", "ipwra", "rolling_ipwra_demean"),
+            pytest.param("detrend", "ipwra", "rolling_ipwra_detrend",
+                         marks=XFAIL_EVENT_STUDY),
+            pytest.param("demean", "ipwra", "rolling_ipwra_demean",
+                         marks=XFAIL_EVENT_STUDY),
         ],
     )
     def test_walmart_eventstudy_point_goldens(
@@ -717,7 +694,6 @@ class TestEventStudySpec:
             eff = res.event_study_effects[r]
             np.testing.assert_allclose(eff["effect"], att, atol=PRINTED_ATOL)
 
-    @XFAIL_EVENT_STUDY_GOLDENS
     @pytest.mark.parametrize(
         "outcome,table_key",
         [
@@ -730,8 +706,10 @@ class TestEventStudySpec:
         "rolling,estimator,column",
         [
             ("detrend", "ra", "rolling_ra_detrend"),
-            ("detrend", "ipwra", "rolling_ipwra_detrend"),
-            ("demean", "ipwra", "rolling_ipwra_demean"),
+            pytest.param("detrend", "ipwra", "rolling_ipwra_detrend",
+                         marks=XFAIL_EVENT_STUDY_GOLDENS),
+            pytest.param("demean", "ipwra", "rolling_ipwra_demean",
+                         marks=XFAIL_EVENT_STUDY_GOLDENS),
         ],
     )
     def test_walmart_eventstudy_se_goldens(
@@ -739,6 +717,13 @@ class TestEventStudySpec:
     ):
         """Bootstrap SEs vs the paper's printed B=999 draws (non-strict:
         re-seeded bootstrap noise can sit near printed precision)."""
+        # detrend-ra + a4_retail still sits at the tolerance boundary;
+        # a5_wholesale now passes reliably.
+        if estimator == "ra" and "retail" in outcome:
+            pytest.xfail(
+                "SE golden for detrend-ra a4_retail sits at B=999 "
+                "bootstrap tolerance boundary across platforms."
+            )
         res = self._fit_es(walmart, rolling, estimator, outcome=outcome)
         table = golden[table_key]
         for r_str, cols in table.items():
@@ -747,7 +732,6 @@ class TestEventStudySpec:
             eff = res.event_study_effects[r]
             np.testing.assert_allclose(eff["se"], se, atol=PRINTED_ATOL)
 
-    @XFAIL_EVENT_STUDY
     def test_anchor_periods_excluded(self, walmart):
         res_dm = self._fit_es(walmart, "demean", "ra")
         assert -1 not in res_dm.event_study_effects
@@ -772,7 +756,6 @@ class TestEventStudySpec:
             resid = pre["y"].to_numpy(dtype=float) - X @ beta
             np.testing.assert_allclose(resid.sum(), 0.0, atol=1e-9)
 
-    @XFAIL_EVENT_STUDY
     def test_simultaneous_band_metadata(self, walmart):
         res = self._fit_es(walmart, "detrend", "ra")
         assert res.cband_method is not None

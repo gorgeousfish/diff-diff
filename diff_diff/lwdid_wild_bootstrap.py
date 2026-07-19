@@ -37,7 +37,10 @@ from typing import Optional
 
 import numpy as np
 
-from .lwdid_exceptions import BootstrapConvergenceError, NumericalWarning
+from .lwdid_exceptions import NumericalWarning
+
+# Backward compat alias
+BootstrapConvergenceError = ValueError
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -754,7 +757,7 @@ def wild_cluster_bootstrap(
     att_valid = att_bootstrap[valid_mask]
 
     if len(t_stats_valid) == 0:
-        raise BootstrapConvergenceError(
+        raise ValueError(
             "All bootstrap replications produced degenerate results (NaN t-stats). "
             "This may indicate a singular design matrix or insufficient variation."
         )
