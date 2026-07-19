@@ -892,30 +892,30 @@ class LWDiD:
             #   - not_yet_treated (cohort_i > g): keep only t < cohort_i
             if self.control_group == "not_yet_treated":
                 cohort_g_set = set(cohort_g_units)
-                post_mask_g = sub_df[time].isin(post_periods_g) & (
-                    sub_df[unit].isin(cohort_g_set)  # treated cohort: all post
-                    | (sub_df[cohort] == 0)
-                    | sub_df[cohort].isna()  # never-treated: all post
-                    | (sub_df[time] < sub_df[cohort])  # not-yet-treated: only before own treatment
+                post_mask_g = sub_df[time].isin(post_periods_g) & (  # type: ignore[union-attr, call-overload]
+                    sub_df[unit].isin(cohort_g_set)  # type: ignore[union-attr, call-overload]
+                    | (sub_df[cohort] == 0)  # type: ignore[call-overload]
+                    | sub_df[cohort].isna()  # type: ignore[union-attr, call-overload]
+                    | (sub_df[time] < sub_df[cohort])  # type: ignore[operator, call-overload]
                 )
             else:
-                post_mask_g = sub_df[time].isin(post_periods_g)
+                post_mask_g = sub_df[time].isin(post_periods_g)  # type: ignore[union-attr, call-overload]
 
-            post_sub = sub_df.loc[post_mask_g]
+            post_sub = sub_df.loc[post_mask_g]  # type: ignore[union-attr]
 
             unit_post_avg_g = post_sub.groupby(unit)["_ydot"].mean().reset_index()
             unit_post_avg_g.columns = [unit, "_ydot_avg"]
 
             # Build cross-sectional sample
             # Treatment indicator: 1 if unit is in cohort g
-            cs_g = sub_df.drop_duplicates(subset=[unit], keep="first")[[unit] + controls].copy()
+            cs_g = sub_df.drop_duplicates(subset=[unit], keep="first")[[unit] + controls].copy()  # type: ignore[union-attr]
             cs_g["_treat_g"] = cs_g[unit].isin(cohort_g_units).astype(float)
 
             if cluster is not None:
                 if cluster == unit:
                     cs_g[cluster] = cs_g[unit]
                 else:
-                    cluster_map_g = sub_df.drop_duplicates(subset=[unit], keep="first").set_index(
+                    cluster_map_g = sub_df.drop_duplicates(subset=[unit], keep="first").set_index(  # type: ignore[union-attr]
                         unit
                     )[cluster]
                     cs_g[cluster] = cs_g[unit].map(cluster_map_g)
@@ -1245,6 +1245,11 @@ class LWDiD:
 
             cohort_data_cache[g] = cache_g
 
+        # Precompute unit-level controls lookup (time-invariant)
+        _unit_controls_df = None
+        if controls:
+            _unit_controls_df = df.drop_duplicates(subset=[unit], keep="first").set_index(unit)
+
         # Compute WATT(r) and influence functions
         event_study_effects = {}
         if_matrix = {}  # r -> IF vector of shape (n_total_units,)
@@ -1313,15 +1318,30 @@ class LWDiD:
                 cs_units = [cs_units[i] for i in range(len(valid_mask)) if valid_mask[i]]
 
                 controls_matrix_g = None
-                if controls:
-                    ctrl_df = sub_df.drop_duplicates(subset=[unit], keep="first").set_index(unit)
+                if controls and _unit_controls_df is not None:
                     ctrl_vals = []
+                    valid_ctrl_mask = []
                     for u in cs_units:
-                        if u in ctrl_df.index:
-                            ctrl_vals.append(ctrl_df.loc[u, controls].values.astype(np.float64))
+                        if u in _unit_controls_df.index:
+                            row = _unit_controls_df.loc[u, controls]
+                            vals = row.values.astype(np.float64) if hasattr(row, 'values') else np.array([float(row)])
+                            if np.all(np.isfinite(vals)):
+                                ctrl_vals.append(vals)
+                                valid_ctrl_mask.append(True)
+                            else:
+                                valid_ctrl_mask.append(False)
                         else:
-                            ctrl_vals.append(np.full(len(controls), np.nan))
-                    controls_matrix_g = np.array(ctrl_vals)
+                            valid_ctrl_mask.append(False)
+                    # Filter out units with missing controls
+                    if len(ctrl_vals) < len(cs_units):
+                        valid_ctrl_mask = np.array(valid_ctrl_mask)
+                        y_vec = y_vec[valid_ctrl_mask]
+                        treat_vec = treat_vec[valid_ctrl_mask]
+                        cs_units = [cs_units[i] for i in range(len(valid_ctrl_mask)) if valid_ctrl_mask[i]]
+                        if len(cs_units) < 3 or treat_vec.sum() == 0 or treat_vec.sum() == len(treat_vec):
+                            continue
+                    if ctrl_vals:
+                        controls_matrix_g = np.array(ctrl_vals)
 
                 att_g_r, se_g_r, coefs_g_r, vcov_g_r, n_params = self._dispatch_estimator(
                     y_vec, treat_vec, controls_matrix_g, None, len(y_vec)
@@ -1669,7 +1689,7 @@ class LWDiD:
                 df_transformed = self._transform_demean(df, outcome, unit, pre_mask_g)
 
             # Per-unit average of transformed outcome in post-periods (>= g)
-            post_data = df_transformed.loc[post_mask_g]
+            post_data = df_transformed.loc[post_mask_g]  # type: ignore[union-attr]
             unit_avg_g = post_data.groupby(unit)["_ydot"].mean()
             ydot_by_cohort[g] = unit_avg_g
 
@@ -3348,8 +3368,8 @@ class LWDiD:
         else:
             df_t = self._transform_detrend(df, outcome, unit, time, pre_mask)
 
-        post_mask = df_t[time].isin(post_periods)
-        post_df = df_t.loc[post_mask]
+        post_mask = df_t[time].isin(post_periods)  # type: ignore[union-attr, call-overload]
+        post_df = df_t.loc[post_mask]  # type: ignore[union-attr]
         unit_post_avg = post_df.groupby(unit)["_ydot"].mean()
 
         cs_df = df.drop_duplicates(subset=[unit], keep="first")[[unit] + controls].copy()
@@ -3419,16 +3439,16 @@ class LWDiD:
                     )
 
                 # Cross-sectional estimate
-                post_mask_b = boot_df[time].isin(post_periods)
-                post_b = boot_df.loc[post_mask_b]
+                post_mask_b = boot_df[time].isin(post_periods)  # type: ignore[union-attr, call-overload]
+                post_b = boot_df.loc[post_mask_b]  # type: ignore[union-attr]
                 unit_avg_b = post_b.groupby("_boot_unit")["_ydot"].mean()
 
-                cs_b = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[
+                cs_b = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[  # type: ignore[union-attr]
                     ["_boot_unit"]
                 ].copy()
                 if controls:
                     for c in controls:
-                        cs_b[c] = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[
+                        cs_b[c] = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[  # type: ignore[union-attr]
                             c
                         ].values
 
@@ -3468,7 +3488,7 @@ class LWDiD:
             # Pre-generate all bootstrap unit samples with deterministic seeds
             boot_unit_samples = []
             for b in range(self.n_bootstrap):
-                rng_b = np.random.default_rng(seed=self.bootstrap_seed + b)
+                rng_b = np.random.default_rng(seed=(self.bootstrap_seed or 0) + b)
                 boot_treated = rng_b.choice(treated_arr, size=n_treated, replace=True)
                 boot_control = rng_b.choice(control_arr, size=n_control, replace=True)
                 boot_unit_samples.append(np.concatenate([boot_treated, boot_control]))
@@ -3511,16 +3531,16 @@ class LWDiD:
                     )
 
                 # Cross-sectional estimate
-                post_mask_b = boot_df[time].isin(post_periods)
-                post_b = boot_df.loc[post_mask_b]
+                post_mask_b = boot_df[time].isin(post_periods)  # type: ignore[union-attr, call-overload]
+                post_b = boot_df.loc[post_mask_b]  # type: ignore[union-attr]
                 unit_avg_b = post_b.groupby("_boot_unit")["_ydot"].mean()
 
-                cs_b = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[
+                cs_b = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[  # type: ignore[union-attr]
                     ["_boot_unit"]
                 ].copy()
                 if controls:
                     for c in controls:
-                        cs_b[c] = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[
+                        cs_b[c] = boot_df.drop_duplicates(subset=["_boot_unit"], keep="first")[  # type: ignore[union-attr]
                             c
                         ].values
 
@@ -3957,7 +3977,7 @@ def validate_staggered_data(data, unit, time, cohort) -> Dict[str, Any]:
 
     df = data.copy()
 
-    results = {"valid": True, "warnings": [], "errors": []}
+    results: dict[str, Any] = {"valid": True, "warnings": [], "errors": []}
 
     # Check required columns exist
     for col in [unit, time, cohort]:

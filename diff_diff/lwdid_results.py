@@ -176,7 +176,7 @@ class LWDiDResults:
                 }
             ]
             if self.has_period_effects:
-                for period, eff in sorted(self.period_effects.items()):
+                for period, eff in sorted(self.period_effects.items()):  # type: ignore[union-attr]
                     ci = eff.get("conf_int", (np.nan, np.nan))
                     rows.append(
                         {
@@ -197,12 +197,12 @@ class LWDiDResults:
                     )
             return pd.DataFrame(rows)
 
-        rows: List[Dict[str, Any]] = []
-        for cohort, eff in self.cohort_effects.items():
+        rows_stag: List[Dict[str, Any]] = []
+        for cohort, eff in self.cohort_effects.items():  # type: ignore[union-attr]
             ci = eff.get("conf_int", (np.nan, np.nan))
             n_t = eff.get("n_treated", 0)
             n_c = eff.get("n_control", 0)
-            rows.append(
+            rows_stag.append(
                 {
                     "cohort": cohort,
                     "att": eff.get("att", np.nan),
@@ -216,7 +216,7 @@ class LWDiDResults:
                 }
             )
         # Append overall row
-        rows.append(
+        rows_stag.append(
             {
                 "cohort": "Overall",
                 "att": self.att,
@@ -229,7 +229,7 @@ class LWDiDResults:
                 "n_control": self.n_control,
             }
         )
-        return pd.DataFrame(rows)
+        return pd.DataFrame(rows_stag)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert results to a JSON-serializable dictionary.
@@ -332,7 +332,7 @@ class LWDiDResults:
         cohorts = self.cohort_effects
         atts = []
         weights = []
-        for cohort, eff in cohorts.items():
+        for cohort, eff in cohorts.items():  # type: ignore[union-attr]
             att_c = eff.get("att", np.nan)
             n_c = eff.get("n_treated", 1)
             if not np.isnan(att_c):
@@ -364,14 +364,14 @@ class LWDiDResults:
 
         # Aggregate SEs via delta method (independence across cohorts)
         # Exclude cohorts with NaN or non-positive SE from aggregation
-        valid_mask = []
+        valid_mask_list = []
         for i, (cohort, eff) in enumerate(
-            (c, e) for c, e in cohorts.items() if not np.isnan(e.get("att", np.nan))
+            (c, e) for c, e in cohorts.items() if not np.isnan(e.get("att", np.nan))  # type: ignore[union-attr]
         ):
             se_c = eff.get("se", np.nan)
-            valid_mask.append(np.isfinite(se_c) and se_c > 0)
+            valid_mask_list.append(np.isfinite(se_c) and se_c > 0)
 
-        valid_mask = np.array(valid_mask, dtype=bool)
+        valid_mask = np.array(valid_mask_list, dtype=bool)
         if not valid_mask.any():
             agg_se = np.nan
             agg_t = np.nan
@@ -380,7 +380,7 @@ class LWDiDResults:
         else:
             # Re-normalize weights for valid SEs only
             ses = []
-            for cohort, eff in cohorts.items():
+            for cohort, eff in cohorts.items():  # type: ignore[union-attr]
                 se_c = eff.get("se", np.nan)
                 if not np.isnan(eff.get("att", np.nan)):
                     ses.append(se_c)
@@ -397,7 +397,7 @@ class LWDiDResults:
 
             # Use sum of cluster counts or residual df for aggregation
             _agg_df = (
-                max(int(valid_mask.sum()) - 1, 1)
+                max(int(np.sum(valid_mask)) - 1, 1)
                 if self.n_clusters is None
                 else max(self.n_clusters - 1, 1)
             )
@@ -488,7 +488,7 @@ class LWDiDResults:
             lines.append(dash)
             lines.append(header)
             lines.append(dash)
-            for cohort, eff in self.cohort_effects.items():
+            for cohort, eff in self.cohort_effects.items():  # type: ignore[union-attr]
                 ci = eff.get("conf_int", (np.nan, np.nan))
                 p = eff.get("p_value", np.nan)
                 stars = "" if np.isnan(p) else _get_significance_stars(float(p))
@@ -530,7 +530,7 @@ class LWDiDResults:
                 lines.append(dash)
                 lines.append(header)
                 lines.append(dash)
-                for period, eff in sorted(self.period_effects.items()):
+                for period, eff in sorted(self.period_effects.items()):  # type: ignore[union-attr]
                     ci = eff.get("conf_int", (np.nan, np.nan))
                     p = eff.get("p_value", np.nan)
                     stars_p = "" if np.isnan(p) else _get_significance_stars(float(p))

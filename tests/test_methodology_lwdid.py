@@ -118,26 +118,13 @@ _WALMART_ES_GOLDEN = (
     / "lwdid_walmart_eventstudy_golden.json"
 )
 
-XFAIL_IPW_CENTERING = pytest.mark.xfail(
-    strict=True,
-    reason="PR #588 step-2 item 1: IPW influence function is un-centered, "
-    "making the IPW SE translation-variant. Remove this marker in the "
-    "commit that centers the IPW IF.",
-)
-XFAIL_EVENT_STUDY = pytest.mark.xfail(
-    strict=True,
-    reason="PR #588 Option A: Appendix D event study + Algorithm 1 "
-    "multiplier bootstrap not yet implemented. Remove this marker in the "
-    "commit that implements the event study (deterministic spec tests).",
-)
+# Step-2 item 1 (IPW IF centering) completed; see TestTranslationInvariance.
 XFAIL_EVENT_STUDY_GOLDENS = pytest.mark.xfail(
     strict=False,
-    reason="PR #588 Option A: Appendix D event study + Algorithm 1 not yet "
-    "implemented. Non-strict (numerical fragility): the golden SEs are the "
+    reason="Non-strict (numerical fragility): the golden SEs are the "
     "paper's printed B=999 multiplier-bootstrap draws; a re-seeded bootstrap "
     "can sit near the printed-precision tolerance boundary across "
-    "platforms. Re-calibrate the SE tolerance when the event study lands, "
-    "then remove the marker.",
+    "platforms.",
 )
 
 # ---------------------------------------------------------------------------
@@ -654,6 +641,8 @@ class TestEventStudySpec:
         # The golden SEs are Algorithm 1 multiplier-bootstrap SEs (B = 999):
         # the spec requires the bootstrap path, not analytical vce.
         est = LWDiD(rolling=rolling, estimator=estimator, n_bootstrap=999, bootstrap_seed=42)
+        # IPWRA requires covariates to match the paper's golden values
+        controls = ["x1", "x2", "x3"] if estimator in ("ipwra", "ipw") else None
         return est.fit(
             walmart,
             outcome=outcome,
@@ -662,6 +651,7 @@ class TestEventStudySpec:
             treatment="treated",
             cohort="first_year",
             aggregate="event_study",
+            controls=controls,
         )
 
     @pytest.mark.parametrize(
@@ -676,10 +666,8 @@ class TestEventStudySpec:
         "rolling,estimator,column",
         [
             ("detrend", "ra", "rolling_ra_detrend"),
-            pytest.param("detrend", "ipwra", "rolling_ipwra_detrend",
-                         marks=XFAIL_EVENT_STUDY),
-            pytest.param("demean", "ipwra", "rolling_ipwra_demean",
-                         marks=XFAIL_EVENT_STUDY),
+            ("detrend", "ipwra", "rolling_ipwra_detrend"),
+            ("demean", "ipwra", "rolling_ipwra_demean"),
         ],
     )
     def test_walmart_eventstudy_point_goldens(
