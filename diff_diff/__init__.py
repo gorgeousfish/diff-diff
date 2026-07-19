@@ -294,6 +294,13 @@ from diff_diff.visualization import (
     plot_staircase,
     plot_synth_weights,
 )
+from diff_diff.lwdid_randomization import randomization_inference
+from diff_diff.lwdid_sensitivity import sensitivity_analysis
+from diff_diff.lwdid_trend_diagnostics import (
+    recommend_transformation,
+    test_parallel_trends,
+)
+from diff_diff.lwdid_wild_bootstrap import wild_cluster_bootstrap
 from diff_diff.wooldridge import WooldridgeDiD
 from diff_diff.wooldridge_results import WooldridgeDiDResults
 
