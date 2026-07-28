@@ -127,6 +127,14 @@ XFAIL_EVENT_STUDY_GOLDENS = pytest.mark.xfail(
     "platforms.",
 )
 
+XFAIL_STAGGERED_COVARIANCE = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#735: non-composite staggered inference assumes independent cohort effects "
+        "despite shared controls; remove when joint covariance is retained."
+    ),
+)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -694,10 +702,12 @@ class TestEventStudySpec:
         "rolling,estimator,column",
         [
             ("detrend", "ra", "rolling_ra_detrend"),
-            pytest.param("detrend", "ipwra", "rolling_ipwra_detrend",
-                         marks=XFAIL_EVENT_STUDY_GOLDENS),
-            pytest.param("demean", "ipwra", "rolling_ipwra_demean",
-                         marks=XFAIL_EVENT_STUDY_GOLDENS),
+            pytest.param(
+                "detrend", "ipwra", "rolling_ipwra_detrend", marks=XFAIL_EVENT_STUDY_GOLDENS
+            ),
+            pytest.param(
+                "demean", "ipwra", "rolling_ipwra_demean", marks=XFAIL_EVENT_STUDY_GOLDENS
+            ),
         ],
     )
     def test_walmart_eventstudy_se_goldens(
@@ -755,6 +765,67 @@ class TestEventStudySpec:
 # ---------------------------------------------------------------------------
 # 9. Monte Carlo bias ordering (LW 2026, Section 5)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@XFAIL_STAGGERED_COVARIANCE
+def test_staggered_delta_se_matches_unit_cluster_bootstrap():
+    """Joint staggered inference should agree with a unit-cluster bootstrap.
+
+    The non-composite path deliberately uses HC1 so the composite-regression
+    shortcut is not selected. Treated cohorts share the never-treated units,
+    making covariance among cohort effects material to the overall ATT.
+    """
+    rng = np.random.default_rng(20260728)
+    rows = []
+    unit = 0
+    for cohort, n_units in ((0, 30), (3, 20), (5, 20), (7, 20)):
+        for _ in range(n_units):
+            unit_effect = rng.normal()
+            for time in range(1, 11):
+                rows.append(
+                    {
+                        "unit": unit,
+                        "time": time,
+                        "cohort": cohort,
+                        "treat": int(cohort > 0 and time >= cohort),
+                        "y": unit_effect + 0.2 * time + 0.4 * np.sin(time) + rng.normal(scale=0.5),
+                    }
+                )
+            unit += 1
+
+    data = pd.DataFrame(rows)
+    fit_kwargs = {
+        "outcome": "y",
+        "unit": "unit",
+        "time": "time",
+        "treatment": "treat",
+        "cohort": "cohort",
+    }
+
+    def fit(frame):
+        return LWDiD(
+            rolling="demean",
+            estimator="ra",
+            vce="hc1",
+            control_group="never_treated",
+        ).fit(frame, **fit_kwargs)
+
+    analytical = fit(data)
+    unit_frames = [group.copy() for _, group in data.groupby("unit", sort=False)]
+    bootstrap_atts = []
+    for _ in range(199):
+        parts = []
+        for bootstrap_unit, sampled_index in enumerate(
+            rng.integers(len(unit_frames), size=len(unit_frames))
+        ):
+            part = unit_frames[sampled_index].copy()
+            part["unit"] = bootstrap_unit
+            parts.append(part)
+        bootstrap_atts.append(fit(pd.concat(parts, ignore_index=True)).att)
+
+    bootstrap_se = float(np.std(bootstrap_atts, ddof=1))
+    np.testing.assert_allclose(analytical.se, bootstrap_se, rtol=0.15)
 
 
 @pytest.mark.slow
