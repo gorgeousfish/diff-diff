@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -304,18 +304,19 @@ class LWDiDResults:
         return latex_str
 
     def aggregate(self, by: str = "overall") -> LWDiDResults:
-        """Aggregate staggered cohort effects to a single ATT.
+        """Return the fitted overall ATT for a staggered design.
 
         Parameters
         ----------
         by : str, default 'overall'
-            Aggregation method. Currently supports 'overall' (weighted average
-            across cohorts using cohort sample sizes).
+        Aggregation method. Currently supports 'overall'. The overall ATT and
+            its inference are computed jointly during :meth:`LWDiD.fit`; this
+            method returns that canonical fitted result.
 
         Returns
         -------
         LWDiDResults
-            New results object with the aggregated ATT.
+            New results object with the canonical fitted ATT and inference.
 
         Raises
         ------
@@ -329,104 +330,10 @@ class LWDiDResults:
         if by != "overall":
             raise ValueError(f"Unsupported aggregation method: {by!r}")
 
-        cohorts = self.cohort_effects
-        atts = []
-        weights = []
-        for cohort, eff in cohorts.items():  # type: ignore[union-attr]
-            att_c = eff.get("att", np.nan)
-            n_c = eff.get("n_treated", 1)
-            if not np.isnan(att_c):
-                atts.append(att_c)
-                weights.append(n_c)
-
-        if not atts:
-            return LWDiDResults(
-                att=np.nan,
-                se=np.nan,
-                t_stat=np.nan,
-                p_value=np.nan,
-                conf_int=(np.nan, np.nan),
-                n_obs=self.n_obs,
-                n_treated=self.n_treated,
-                n_control=self.n_control,
-                rolling=self.rolling,
-                estimator=self.estimator,
-                vce_type=self.vce_type,
-                alpha=self.alpha,
-                cluster_name=self.cluster_name,
-                n_clusters=self.n_clusters,
-            )
-
-        w = np.array(weights, dtype=float)
-        w = w / w.sum()
-        a = np.array(atts, dtype=float)
-        agg_att = float(np.dot(w, a))
-
-        # Aggregate SEs via delta method (independence across cohorts)
-        # Exclude cohorts with NaN or non-positive SE from aggregation
-        valid_mask_list = []
-        for i, (cohort, eff) in enumerate(
-            (c, e) for c, e in cohorts.items() if not np.isnan(e.get("att", np.nan))  # type: ignore[union-attr]
-        ):
-            se_c = eff.get("se", np.nan)
-            valid_mask_list.append(np.isfinite(se_c) and se_c > 0)
-
-        valid_mask = np.array(valid_mask_list, dtype=bool)
-        if not valid_mask.any():
-            agg_se = np.nan
-            agg_t = np.nan
-            agg_p = np.nan
-            agg_ci = (np.nan, np.nan)
-        else:
-            # Re-normalize weights for valid SEs only
-            ses = []
-            for cohort, eff in cohorts.items():  # type: ignore[union-attr]
-                se_c = eff.get("se", np.nan)
-                if not np.isnan(eff.get("att", np.nan)):
-                    ses.append(se_c)
-            se_arr = np.array(ses, dtype=float)
-
-            # Only use valid (finite, positive) SEs
-            w_valid = w[valid_mask]
-            w_valid = w_valid / w_valid.sum()
-            se_valid = se_arr[valid_mask]
-            agg_se = float(np.sqrt(np.dot(w_valid**2, se_valid**2)))
-
-            # Use safe_inference with t-distribution for proper inference
-            from diff_diff.utils import safe_inference
-
-            # Use sum of cluster counts or residual df for aggregation
-            _agg_df = (
-                max(int(np.sum(valid_mask)) - 1, 1)
-                if self.n_clusters is None
-                else max(self.n_clusters - 1, 1)
-            )
-            agg_t, agg_p, agg_ci = safe_inference(agg_att, agg_se, alpha=self.alpha, df=_agg_df)
-
-        return LWDiDResults(
-            att=agg_att,
-            se=agg_se,
-            t_stat=agg_t,
-            p_value=agg_p,
-            conf_int=agg_ci,
-            n_obs=self.n_obs,
-            n_treated=self.n_treated,
-            n_control=self.n_control,
-            rolling=self.rolling,
-            estimator=self.estimator,
-            vce_type=self.vce_type,
-            alpha=self.alpha,
-            cluster_name=self.cluster_name,
-            n_clusters=self.n_clusters,
-            cohort_effects=self.cohort_effects,
-            overall_att={
-                "att": agg_att,
-                "se": agg_se,
-                "t_stat": agg_t,
-                "p_value": agg_p,
-                "conf_int": agg_ci,
-            },
-        )
+        # Cohort effects can share controls, and some fit paths compute the
+        # overall estimate with a joint composite regression. Reconstructing
+        # uncertainty from marginal cohort SEs would discard that covariance.
+        return replace(self)
 
     # ------------------------------------------------------------------ #
     # Text summary                                                        #

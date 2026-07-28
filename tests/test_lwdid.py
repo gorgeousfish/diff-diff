@@ -515,6 +515,22 @@ class TestLWDiDStaggered:
         )
         assert res.se > 0
 
+    def test_aggregate_preserves_fitted_overall_inference(self, stag_panel):
+        """aggregate('overall') must not discard joint fitted inference."""
+        result = LWDiD(estimator="ra", vce="classical", control_group="never_treated").fit(
+            stag_panel, outcome="y", unit="unit", time="time", treatment="treat", cohort="cohort"
+        )
+
+        aggregated = result.aggregate("overall")
+
+        assert aggregated is not result
+        assert aggregated.att == result.att
+        assert aggregated.se == result.se
+        assert aggregated.t_stat == result.t_stat
+        assert aggregated.p_value == result.p_value
+        assert aggregated.conf_int == result.conf_int
+        assert aggregated.df_inference == result.df_inference
+
     def test_staggered_detrend(self, stag_panel):
         """Detrend should also work for staggered."""
         res = LWDiD(rolling="detrend", control_group="never_treated").fit(
